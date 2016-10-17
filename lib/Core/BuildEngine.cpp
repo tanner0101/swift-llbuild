@@ -187,11 +187,19 @@ class BuildEngineImpl {
       assert(isScanning());
       return inProgressInfo.pendingScanRecord;
     }
+    const RuleScanRecord* getPendingScanRecord() const {
+      assert(isScanning());
+      return inProgressInfo.pendingScanRecord;
+    }
     void setPendingScanRecord(RuleScanRecord* value) {
       inProgressInfo.pendingScanRecord = value;
     }
 
     TaskInfo* getPendingTaskInfo() {
+      assert(isInProgress());
+      return inProgressInfo.pendingTaskInfo;
+    }
+    const TaskInfo* getPendingTaskInfo() const {
       assert(isInProgress());
       return inProgressInfo.pendingTaskInfo;
     }
@@ -587,7 +595,10 @@ private:
   }
 
   /// Execute all of the work pending in the engine queues until they are empty.
-  void executeTasks() {
+  ///
+  /// \returns True on success, false if the build could not be completed; the
+  /// latter only occurs when the build contains a cycle currently.
+  bool executeTasks() {
     std::vector<TaskInputRequest> finishedInputRequests;
 
     // Process requests as long as we have work to do.
@@ -853,13 +864,20 @@ private:
     // we have found a cycle and are deadlocked.
     if (!taskInfos.empty()) {
       reportCycle();
+      return false;
     }
+
+    return true;
   }
 
   void reportCycle() {
+    // Take all available locks, to ensure we dump a consistent state.
+    std::lock_guard<std::mutex> guard1(taskInfosMutex);
+    std::lock_guard<std::mutex> guard2(finishedTaskInfosMutex);
+
     // Gather all of the successor relationships.
     std::unordered_map<Rule*, std::vector<Rule*>> graph;
-    std::vector<RuleScanRecord *> activeRuleScanRecords;
+    std::vector<const RuleScanRecord *> activeRuleScanRecords;
     for (const auto& it: taskInfos) {
       const TaskInfo& taskInfo = it.second;
       assert(taskInfo.forRuleInfo);
@@ -871,13 +889,21 @@ private:
       for (const auto& request: taskInfo.deferredScanRequests) {
         // Add the sucessor for the deferred relationship itself.
         successors.push_back(&request.ruleInfo->rule);
-          
-        // Add the active rule scan record which needs to be traversed.
-        assert(request.ruleInfo->isScanning());
-        activeRuleScanRecords.push_back(
-            request.ruleInfo->getPendingScanRecord());
       }
       graph.insert({ &taskInfo.forRuleInfo->rule, successors });
+    }
+
+    // Add the pending scan records for every rule.
+    //
+    // NOTE: There is a very subtle condition around this versus adding the ones
+    // accessible via the tasks, see https://bugs.swift.org/browse/SR-1948.
+    // Unfortunately, we do not have a test case for this!
+    for (const auto& it: ruleInfos) {
+      const RuleInfo& ruleInfo = it.second;
+      if (ruleInfo.isScanning()) {
+        const auto* scanRecord = ruleInfo.getPendingScanRecord();
+        activeRuleScanRecords.push_back(scanRecord);
+      }
     }
       
     // Gather dependencies from all of the active scan records.
@@ -892,8 +918,10 @@ private:
           
       // For each paused request, add the dependency.
       for (const auto& request: record->pausedInputRequests) {
-        graph[&request.inputRuleInfo->rule].push_back(
-            &request.taskInfo->forRuleInfo->rule);
+        if (request.taskInfo) {
+          graph[&request.inputRuleInfo->rule].push_back(
+              &request.taskInfo->forRuleInfo->rule);
+        }
       }
           
       // Process the deferred scan requests.
@@ -907,6 +935,7 @@ private:
             request.ruleInfo->getPendingScanRecord());
       }
     }
+    
     // Find the cycle, which should be reachable from any remaining node.
     //
     // FIXME: Need a setvector.
@@ -1057,7 +1086,7 @@ public:
     inputRequests.push_back({ nullptr, &ruleInfo });
 
     // Run the build engine, to process any necessary tasks.
-    executeTasks();
+    bool success = executeTasks();
 
     // Update the build database, if attached.
     //
@@ -1078,6 +1107,12 @@ public:
     currentBlockPos = currentBlockEnd = nullptr;
     freeRuleScanRecords.clear();
     ruleScanRecordBlocks.clear();
+
+    // If the build failed, return the empty result.
+    if (!success) {
+      static ValueType emptyValue{};
+      return emptyValue;
+    }
 
     // The task queue should be empty and the rule complete.
     assert(taskInfos.empty() && ruleInfo.isComplete(this));

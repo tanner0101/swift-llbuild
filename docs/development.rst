@@ -5,6 +5,59 @@
 
 This document contains information on developing llbuild.
 
+Build Instructions
+------------------ 
+
+**Building from source on OSX**
+
+* Install latest Xcode and dependencies::
+
+    $ brew install cmake ninja
+
+* Install FileCheck::
+
+    $ brew install llvm
+
+* Build::
+
+    $ mkdir build && cd build
+    $ cmake -G Ninja -DCMAKE_BUILD_TYPE:=Debug ..
+    $ ninja
+
+* If cmake errors out with : `Failed to locate 'lit' executable (missing: LIT_EXECUTABLE)`::
+
+    $ export PATH=$HOME/Library/Python/2.7/bin/:"$PATH" 
+                  
+    and then run cmake or:
+                  
+    $ env PATH=$HOME/Library/Python/2.7/bin/:"$PATH" cmake -G Ninja -DCMAKE_BUILD_TYPE:=Debug ..
+
+Note: this assumes you have installed `lit` as a user, by running `easy_install --user lit`.
+
+**Building from source on Ubuntu**
+
+* Install dependencies::
+
+    $ sudo apt-get install clang cmake ninja-build sqlite3 python-pip libsqlite3-dev libncurses5-dev
+      
+* Install lit via pip::
+
+    $ sudo pip install lit
+
+* Install FileCheck::
+
+    $ sudo apt-get install llvm-3.7-tools
+
+* Build::
+
+    $ mkdir build && cd build
+    $ cmake -G Ninja -DCMAKE_BUILD_TYPE:=Debug -DCMAKE_C_COMPILER:=clang -DCMAKE_CXX_COMPILER:=clang++ ..
+    $ ninja
+
+
+Notes
+-----
+
 The project is set up in the following fashion, generally following the LLVM and
 Swift conventions.
 

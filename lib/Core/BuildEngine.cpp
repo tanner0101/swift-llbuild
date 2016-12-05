@@ -596,10 +596,14 @@ private:
 
   /// Execute all of the work pending in the engine queues until they are empty.
   ///
+  /// \param buildKey The key to build.
   /// \returns True on success, false if the build could not be completed; the
   /// latter only occurs when the build contains a cycle currently.
-  bool executeTasks() {
+  bool executeTasks(const KeyType& buildKey) {
     std::vector<TaskInputRequest> finishedInputRequests;
+
+    // Push a dummy input request for the rule to build.
+    inputRequests.push_back({ nullptr, &getRuleInfoForKey(buildKey) });
 
     // Process requests as long as we have work to do.
     while (true) {
@@ -863,20 +867,25 @@ private:
     // If there was no work to do, but we still have running tasks, then
     // we have found a cycle and are deadlocked.
     if (!taskInfos.empty()) {
-      reportCycle();
+      reportCycle(buildKey);
       return false;
     }
 
     return true;
   }
 
-  void reportCycle() {
+  /// Report the cycle which has called the engine to be unable to make forward
+  /// progress.
+  ///
+  /// \param buildKey The key which was requested to build (the reported cycle
+  /// with start with this node).
+  void reportCycle(const KeyType& buildKey) {
     // Take all available locks, to ensure we dump a consistent state.
     std::lock_guard<std::mutex> guard1(taskInfosMutex);
     std::lock_guard<std::mutex> guard2(finishedTaskInfosMutex);
 
     // Gather all of the successor relationships.
-    std::unordered_map<Rule*, std::vector<Rule*>> graph;
+    std::unordered_map<Rule*, std::vector<Rule*>> successorGraph;
     std::vector<const RuleScanRecord *> activeRuleScanRecords;
     for (const auto& it: taskInfos) {
       const TaskInfo& taskInfo = it.second;
@@ -890,7 +899,7 @@ private:
         // Add the sucessor for the deferred relationship itself.
         successors.push_back(&request.ruleInfo->rule);
       }
-      graph.insert({ &taskInfo.forRuleInfo->rule, successors });
+      successorGraph.insert({ &taskInfo.forRuleInfo->rule, successors });
     }
 
     // Add the pending scan records for every rule.
@@ -919,7 +928,7 @@ private:
       // For each paused request, add the dependency.
       for (const auto& request: record->pausedInputRequests) {
         if (request.taskInfo) {
-          graph[&request.inputRuleInfo->rule].push_back(
+          successorGraph[&request.inputRuleInfo->rule].push_back(
               &request.taskInfo->forRuleInfo->rule);
         }
       }
@@ -927,7 +936,8 @@ private:
       // Process the deferred scan requests.
       for (const auto& request: record->deferredScanRequests) {
         // Add the sucessor for the deferred relationship itself.
-        graph[&request.inputRuleInfo->rule].push_back(&request.ruleInfo->rule);
+        successorGraph[&request.inputRuleInfo->rule].push_back(
+            &request.ruleInfo->rule);
               
         // Add the active rule scan record which needs to be traversed.
         assert(request.ruleInfo->isScanning());
@@ -935,49 +945,63 @@ private:
             request.ruleInfo->getPendingScanRecord());
       }
     }
-    
-    // Find the cycle, which should be reachable from any remaining node.
-    //
-    // FIXME: Need a setvector.
-    std::vector<Rule*> cycleList;
-    std::unordered_set<Rule*> cycleItems;
-    std::function<bool(Rule*)> findCycle;
-    findCycle = [&](Rule* node) {
-      // Push the node on the stack.
-      cycleList.push_back(node);
-      auto it = cycleItems.insert(node);
 
-      // If the node is already in the stack, we found the cycle.
-      if (!it.second)
-        return true;
-
-      // Otherwise, iterate over each successor looking for a cycle.
-      for (Rule* successor: graph[node]) {
-        if (findCycle(successor))
-          return true;
+    // Invert the graph, so we can search from the root.
+    std::unordered_map<Rule*, std::vector<Rule*>> predecessorGraph;
+    for (auto& entry: successorGraph) {
+      Rule* node = entry.first;
+      for (auto& succ: entry.second) {
+        predecessorGraph[succ].push_back(node);
       }
+    }
 
-      // If we didn't find the cycle, pop this item.
-      cycleItems.erase(it.first);
-      cycleList.pop_back();
-      return false;
-    };
-
-    // Iterate through the graph keys in a deterministic order.
-    std::vector<Rule*> orderedKeys;
-    for (auto& entry: graph)
-      orderedKeys.push_back(entry.first);
-    std::sort(orderedKeys.begin(), orderedKeys.end(), [] (Rule* a, Rule* b) {
+    // Normalize predecessor order, to ensure a deterministic result (at least,
+    // if the graph reaches the same cycle).
+    for (auto& entry: predecessorGraph) {
+    std::sort(entry.second.begin(), entry.second.end(), [](Rule* a, Rule* b) {
         return a->key < b->key;
       });
-    for (const auto& key: orderedKeys) {
-      if (findCycle(key))
-        break;
+    }
+    
+    // Find the cycle by searching from the entry node.
+    struct WorkItem {
+      Rule* node;
+      unsigned predecessorIndex = 0;
+    };
+    std::vector<Rule*> cycleList;
+    std::unordered_set<Rule*> cycleItems;
+    std::vector<WorkItem> stack{
+      WorkItem{ &getRuleInfoForKey(buildKey).rule } };
+    while (!stack.empty()) {
+      // Take the top item.
+      auto& entry = stack.back();
+      const auto& predecessors = predecessorGraph[entry.node];
+      
+      // If the index is 0, we just started visiting the node.
+      if (entry.predecessorIndex == 0) {
+        // Push the node on the stack.
+        cycleList.push_back(entry.node);
+        auto it = cycleItems.insert(entry.node);
+
+        // If the node is already in the stack, we found a cycle.
+        if (!it.second)
+          break;
+      }
+
+      // Visit the next predecessor, if possible.
+      if (entry.predecessorIndex != predecessors.size()) {
+        auto* child = predecessors[entry.predecessorIndex];
+        entry.predecessorIndex += 1;
+        stack.emplace_back(WorkItem{ child });
+        continue;
+      }
+
+      // Otherwise, we are done visiting this node.
+      cycleItems.erase(entry.node);
+      cycleList.pop_back();
+      stack.pop_back();
     }
     assert(!cycleList.empty());
-
-    // Reverse the cycle list, since it was formed from the successor graph.
-    std::reverse(cycleList.begin(), cycleList.end());
 
     delegate.cycleDetected(cycleList);
 
@@ -1076,18 +1100,12 @@ public:
     // and \see RuleInfo::isComplete().
     ++currentTimestamp;
 
-    // Find the rule.
-    auto& ruleInfo = getRuleInfoForKey(key);
-
     if (trace)
       trace->buildStarted();
 
-    // Push a dummy input request for this rule.
-    inputRequests.push_back({ nullptr, &ruleInfo });
-
     // Run the build engine, to process any necessary tasks.
-    bool success = executeTasks();
-
+    bool success = executeTasks(key);
+    
     // Update the build database, if attached.
     //
     // FIXME: Is it correct to do this here, or earlier?
@@ -1115,6 +1133,7 @@ public:
     }
 
     // The task queue should be empty and the rule complete.
+    auto& ruleInfo = getRuleInfoForKey(key);
     assert(taskInfos.empty() && ruleInfo.isComplete(this));
     return ruleInfo.result.value;
   }

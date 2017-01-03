@@ -281,6 +281,10 @@ static BuildSystemImpl& getBuildSystem(BuildEngine& engine) {
   return static_cast<BuildSystemEngineDelegate*>(
       engine.getDelegate())->getBuildSystem();
 }
+
+static bool isCancelled(BuildEngine& engine) {
+  return getBuildSystem(engine).getCommandInterface().getDelegate().isCancelled();
+}
   
 /// This is the task used to "build" a target, it translates between the request
 /// for building a target key and the requests for all of its nodes.
@@ -328,6 +332,12 @@ class TargetTask : public Task {
   }
 
   virtual void inputsAvailable(BuildEngine& engine) override {
+    // If the build should cancel, do nothing.
+    if (isCancelled(engine)) {
+      engine.taskIsComplete(this, BuildValue::makeSkippedCommand().toData());
+      return;
+    }
+
     if (hasMissingInput) {
       // FIXME: Design the logging and status output APIs.
       auto& system = getBuildSystem(engine);
@@ -1393,8 +1403,17 @@ class MkdirCommand : public Command {
   // FIXME: This seems wasteful.
   std::string description;
 
+  /// Declared command inputs, used only for ordering purposes.
+  std::vector<BuildNode*> inputs;
+  
   virtual uint64_t getSignature() {
-    return basic::hashString(output->getName());
+    // FIXME: Use a more appropriate hashing infrastructure.
+    using llvm::hash_combine;
+    llvm::hash_code code = hash_value(output->getName());
+    for (const auto* input: inputs) {
+      code = hash_combine(code, input->getName());
+    }
+    return size_t(code);
   }
 
   virtual void configureDescription(const ConfigureContext&,
@@ -1419,7 +1438,10 @@ class MkdirCommand : public Command {
   
   virtual void configureInputs(const ConfigureContext& ctx,
                                const std::vector<Node*>& value) override {
-    ctx.error("unexpected explicit input: '" + value[0]->getName() + "'");
+    inputs.reserve(value.size());
+    for (auto* node: value) {
+      inputs.emplace_back(static_cast<BuildNode*>(node));
+    }
   }
 
   virtual void configureOutputs(const ConfigureContext& ctx,
@@ -1501,6 +1523,15 @@ class MkdirCommand : public Command {
 
     // Eventually we would like to use the system itself to manage recursive
     // directory creation.
+
+    // The command itself takes no inputs, so just treat any declared inputs as
+    // "must follow" directives.
+    //
+    // FIXME: We should make this explicit once we have actual support for must
+    // follow inputs.
+    for (auto it = inputs.begin(), ie = inputs.end(); it != ie; ++it) {
+      bsci.taskMustFollow(task, BuildKey::makeNode(*it));
+    }
   }
 
   virtual void providePriorValue(BuildSystemCommandInterface&, core::Task*,
@@ -1603,11 +1634,20 @@ class SymlinkCommand : public Command {
   /// The command description.
   std::string description;
 
+  /// Declared command inputs, used only for ordering purposes.
+  std::vector<BuildNode*> inputs;
+
   /// The contents to write at the output path.
   std::string contents;
 
   virtual uint64_t getSignature() {
-    return basic::hashString(output->getName()) ^ basic::hashString(contents);
+    using llvm::hash_combine;
+    llvm::hash_code code = hash_value(output->getName());
+    code = hash_combine(code, contents);
+    for (const auto* input: inputs) {
+      code = hash_combine(code, input->getName());
+    }
+    return size_t(code);
   }
 
   virtual void configureDescription(const ConfigureContext&,
@@ -1632,7 +1672,10 @@ class SymlinkCommand : public Command {
   
   virtual void configureInputs(const ConfigureContext& ctx,
                                const std::vector<Node*>& value) override {
-    ctx.error("unexpected explicit input: '" + value[0]->getName() + "'");
+    inputs.reserve(value.size());
+    for (auto* node: value) {
+      inputs.emplace_back(static_cast<BuildNode*>(node));
+    }
   }
 
   virtual void configureOutputs(const ConfigureContext& ctx,
@@ -1705,6 +1748,15 @@ class SymlinkCommand : public Command {
                      core::Task* task) override {
     // Notify the client the command is preparing to run.
     bsci.getDelegate().commandPreparing(this);
+
+    // The command itself takes no inputs, so just treat any declared inputs as
+    // "must follow" directives.
+    //
+    // FIXME: We should make this explicit once we have actual support for must
+    // follow inputs.
+    for (auto it = inputs.begin(), ie = inputs.end(); it != ie; ++it) {
+      bsci.taskMustFollow(task, BuildKey::makeNode(*it));
+    }
   }
 
   virtual void providePriorValue(BuildSystemCommandInterface&, core::Task*,
@@ -2040,4 +2092,11 @@ bool BuildSystem::enableTracing(StringRef path,
 
 bool BuildSystem::build(StringRef name) {
   return static_cast<BuildSystemImpl*>(impl)->build(name);
+}
+
+void BuildSystem::cancel() {
+  if (impl) {
+    auto buildSystemImpl = static_cast<BuildSystemImpl*>(impl);
+    buildSystemImpl->getCommandInterface().getExecutionQueue().cancelAllJobs();
+  }
 }

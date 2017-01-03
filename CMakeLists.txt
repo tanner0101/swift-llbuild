@@ -119,6 +119,14 @@ if(${CMAKE_SYSTEM_NAME} MATCHES "(FreeBSD|DragonFly)")
   link_directories("/usr/local/lib")
 endif(${CMAKE_SYSTEM_NAME} MATCHES "(FreeBSD|DragonFly)")
 
+if(NOT ${LLBUILD_PATH_TO_SQLITE_SOURCE} STREQUAL "")
+  include_directories("${LLBUILD_PATH_TO_SQLITE_SOURCE}")
+endif()
+
+if(NOT "${LLBUILD_PATH_TO_SQLITE_BUILD}" STREQUAL "")
+  link_directories("${LLBUILD_PATH_TO_SQLITE_BUILD}")
+endif()
+
 # Xcode: Use libc++ and c++14 using proper build settings.
 if (XCODE)
   # Force usage of Clang.
@@ -158,6 +166,20 @@ if (XCODE)
 
   # Disable headermaps.
   set(CMAKE_XCODE_ATTRIBUTE_USE_HEADERMAP "NO") 
+elseif(MSVC)
+  # Disable unknown pragma warnings (e.g. for #pragma mark).
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -wd4068")
+
+  # TODO: these warnings come from llvmSupport. Since we don't want to diverge from llvmSupport by
+  # addressing these warnings , disable these for now to clean the build log.
+  # If/when we move to use LLVM's own llvmSupport, we should reenable these warnings.
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -wd4996") # POSIX name for this item is deprecated.
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -wd4244") # Signed conversion.
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -wd4267") # Possible loss of data conversions.
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -wd4291") # Operator new with no matching delete found.
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -wd4800") # Forcing value to bool 'true' or 'false'.
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -wd4146") # Unary minus applied to unsigned type.
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -wd4141") # 'inline' used more than once.
 else ()
   # Compile with C++14, without RTTI or exceptions.
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++14 -fno-rtti -fno-exceptions")

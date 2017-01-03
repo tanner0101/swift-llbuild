@@ -20,6 +20,7 @@
 #include "llbuild/BuildSystem/ExternalCommand.h"
 #include "llbuild/Core/BuildEngine.h"
 
+#include "llvm/ADT/Hashing.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/raw_ostream.h"
@@ -117,14 +118,13 @@ public:
 class CAPIBuildSystemFrontendDelegate : public BuildSystemFrontendDelegate {
   llb_buildsystem_delegate_t cAPIDelegate;
   CAPIFileSystem fileSystem;
-  std::atomic<bool> isCancelled_;
 
 public:
   CAPIBuildSystemFrontendDelegate(llvm::SourceMgr& sourceMgr,
                                   BuildSystemInvocation& invocation,
                                   llb_buildsystem_delegate_t delegate)
       : BuildSystemFrontendDelegate(sourceMgr, invocation, "basic", 0),
-        cAPIDelegate(delegate), fileSystem(delegate), isCancelled_(false) { }
+        cAPIDelegate(delegate), fileSystem(delegate) { }
 
   virtual basic::FileSystem& getFileSystem() override { return fileSystem; }
   
@@ -140,10 +140,6 @@ public:
     }
 
     return std::unique_ptr<Tool>((Tool*)tool);
-  }
-
-  virtual bool isCancelled() override {
-    return isCancelled_;
   }
 
   virtual void hadCommandFailure() override {
@@ -255,18 +251,9 @@ public:
     }
   }
 
-  /// Reset mutable build state before a new build operation.
-  void resetForBuild() {
-    isCancelled_ = false;
-  }
-
   /// Request cancellation of any current build.
-  void cancel() {
-    // FIXME: We need to implement BuildSystem layer support for real
-    // cancellation (including task and subprocess termination).
-
-    // FIXME: We should audit that a build is happening.
-    isCancelled_ = true;
+  void cancel() override {
+    BuildSystemFrontendDelegate::cancel();
   }
 };
 
@@ -422,6 +409,24 @@ public:
   virtual void getVerboseDescription(SmallVectorImpl<char> &result) override {
     // FIXME: Provide client control.
     llvm::raw_svector_ostream(result) << getName();
+  }
+
+  virtual uint64_t getSignature() override {
+    // FIXME: Use a more appropriate hashing infrastructure.
+    using llvm::hash_combine;
+    llvm::hash_code code = ExternalCommand::getSignature();
+    if (cAPIDelegate.get_signature) {
+      llb_data_t data;
+      cAPIDelegate.get_signature(cAPIDelegate.context, (llb_buildsystem_command_t*)this,
+                                 &data);
+      code = hash_combine(code, StringRef((const char*)data.data, data.length));
+
+      // Release the client memory.
+      //
+      // FIXME: This is gross, come up with a general purpose solution.
+      free((char*)data.data);
+    }
+    return size_t(code);
   }
 };
 

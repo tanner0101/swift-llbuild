@@ -256,8 +256,7 @@ public:
     if (!db)
       return false;
 
-    buildEngine.attachDB(std::move(db));
-    return true;
+    return buildEngine.attachDB(std::move(db), error_out);
   }
 
   bool enableTracing(StringRef filename, std::string* error_out) {
@@ -1500,6 +1499,8 @@ class MkdirCommand : public Command {
     if (value.isFailedCommand() || value.isPropagatedFailureCommand() ||
         value.isCancelledCommand())
       return BuildValue::makeFailedInput();
+    if (value.isSkippedCommand())
+      return BuildValue::makeSkippedCommand();
 
     // Otherwise, we should have a successful command -- return the actual
     // result for the output.
@@ -1739,6 +1740,8 @@ class SymlinkCommand : public Command {
     if (value.isFailedCommand() || value.isPropagatedFailureCommand() ||
         value.isCancelledCommand())
       return BuildValue::makeFailedInput();
+    if (value.isSkippedCommand())
+      return BuildValue::makeSkippedCommand();
 
     // Otherwise, we should have a successful command -- return the actual
     // result for the output.

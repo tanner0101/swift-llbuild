@@ -20,6 +20,8 @@
 #include <utility>
 #include <vector>
 
+#include "llvm/ADT/Twine.h"
+
 namespace llbuild {
 namespace core {
 
@@ -29,6 +31,10 @@ typedef std::vector<uint8_t> ValueType;
 
 class BuildDB;
 class BuildEngine;
+
+/// A monotonically increasing timestamp identifying which iteration of a build
+/// an event occurred during.
+typedef uint64_t Timestamp;
 
 /// This object contains the result of executing a task to produce the value for
 /// a key.
@@ -200,6 +206,11 @@ public:
   /// the cycle (i.e., the node participating in the cycle will appear twice).
   virtual void cycleDetected(const std::vector<Rule*>& items) = 0;
 
+  /// Called when a fatal error is encountered by the build engine.
+  ///
+  /// \param message The diagnostic message.
+  virtual void error(const llvm::Twine& message) = 0;
+
 };
 
 /// A build engine supports fast, incremental, persistent, and parallel
@@ -233,6 +244,12 @@ public:
 
   /// Return the delegate the engine was configured with.
   BuildEngineDelegate* getDelegate();
+
+  /// Get the current build timestamp used by the engine.
+  ///
+  /// The timestamp is a monotonically increasing value which is incremented
+  /// with each requested build.
+  Timestamp getCurrentTimestamp();
 
   /// @name Rule Definition
   /// @{

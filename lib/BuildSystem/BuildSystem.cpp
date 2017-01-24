@@ -17,6 +17,7 @@
 #include "llbuild/Basic/FileSystem.h"
 #include "llbuild/Basic/Hashing.h"
 #include "llbuild/Basic/LLVM.h"
+#include "llbuild/Basic/PlatformUtility.h"
 #include "llbuild/Basic/ShellUtility.h"
 #include "llbuild/Core/BuildDB.h"
 #include "llbuild/Core/BuildEngine.h"
@@ -117,6 +118,7 @@ class BuildSystemEngineDelegate : public BuildEngineDelegate {
 
   virtual Rule lookupRule(const KeyType& keyData) override;
   virtual void cycleDetected(const std::vector<Rule*>& items) override;
+  virtual void error(const Twine& message) override;
 
 public:
   BuildSystemEngineDelegate(BuildSystemImpl& system) : system(system) {}
@@ -128,7 +130,7 @@ public:
 
 class BuildSystemImpl : public BuildSystemCommandInterface {
   /// The internal schema version.
-  static const uint32_t internalSchemaVersion = 3;
+  static const uint32_t internalSchemaVersion = 4;
   
   BuildSystem& buildSystem;
 
@@ -826,12 +828,17 @@ void BuildSystemEngineDelegate::cycleDetected(const std::vector<Rule*>& cycle) {
   system.error(system.getMainFilename(), os.str());
 }
 
+void BuildSystemEngineDelegate::error(const Twine& message) {
+  system.error(system.getMainFilename(), message);
+}
+
 #pragma mark - BuildSystemImpl implementation
 
 std::unique_ptr<BuildNode>
 BuildSystemImpl::lookupNode(StringRef name, bool isImplicit) {
   bool isVirtual = !name.empty() && name[0] == '<' && name.back() == '>';
-  return llvm::make_unique<BuildNode>(name, isVirtual);
+  return llvm::make_unique<BuildNode>(name, isVirtual,
+                                      /*isCommandTimestamp=*/false);
 }
 
 bool BuildSystemImpl::build(StringRef target) {
@@ -1828,7 +1835,7 @@ class SymlinkCommand : public Command {
       auto success = true;
       if (llvm::sys::fs::create_link(contents, output->getName())) {
         // On failure, we attempt to unlink the file and retry.
-        ::unlink(output->getName().str().c_str());
+        basic::sys::unlink(output->getName().str().c_str());
         
         if (llvm::sys::fs::create_link(contents, output->getName())) {
           getBuildSystem(bsci.getBuildEngine()).error(

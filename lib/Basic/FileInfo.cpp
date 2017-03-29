@@ -40,7 +40,7 @@ FileInfo FileInfo::getInfoForPath(const std::string& path, bool asLink) {
   }
 
   result.device = buf.st_dev;
-  result.inode = buf.st_ino;
+  result.inode = 0; // result.inode = buf.st_ino;
   result.mode = buf.st_mode;
   result.size = buf.st_size;
 #if defined(__APPLE__)
